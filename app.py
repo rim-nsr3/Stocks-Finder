@@ -1,15 +1,16 @@
+import pandas as pd
 import streamlit as st
 from pinecone import Pinecone, ServerlessSpec
 import os
 from dotenv import load_dotenv
 from sentence_transformers import SentenceTransformer
-import yfinance as yf
 import json
 import requests
 
 # Load environment variables from .env file
 load_dotenv()
 
+# Initialize Pinecone
 pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
 index_name = "stocks"
 
@@ -23,11 +24,78 @@ if index_name not in pc.list_indexes().names():
 pinecone_index = pc.Index(index_name)
 
 # Initialize Embedding Model
-model = SentenceTransformer('all-mpnet-base-v2')  # Model outputs embeddings of dimension 384
+model = SentenceTransformer('all-mpnet-base-v2')
 
 # Load Stock Metadata
 with open('company_tickers.json') as f:
     stock_metadata = json.load(f)
+
+# Alpha Vantage Real-Time Data Function
+def fetch_real_time_data_alpha_vantage(ticker):
+    api_key = os.getenv("ALPHA_VANTAGE_API_KEY")
+    url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={ticker}&apikey={api_key}"
+    response = requests.get(url)
+    data = response.json()
+
+    if "Global Quote" in data and data["Global Quote"]:
+        quote = data["Global Quote"]
+        return {
+            "Symbol": quote.get("01. symbol", "Unknown"),
+            "Open": quote.get("02. open", "N/A"),
+            "High": quote.get("03. high", "N/A"),
+            "Low": quote.get("04. low", "N/A"),
+            "Price": quote.get("05. price", "N/A"),
+            "Volume": quote.get("06. volume", "N/A"),
+            "Previous Close": quote.get("08. previous close", "N/A"),
+        }
+    else:
+        return {"Error": "No data found for ticker using Alpha Vantage."}
+
+# Get Stock Data Function
+def get_stock_data(ticker):
+    try:
+        # Ensure ticker is uppercase
+        ticker = ticker.upper()
+
+        # Fetch metadata from JSON
+        json_data = None
+        for key, value in stock_metadata.items():
+            if value.get("ticker") == ticker:
+                json_data = value
+                break
+
+        # Fetch real-time data from Alpha Vantage
+        real_time_data = fetch_real_time_data_alpha_vantage(ticker)
+
+        # Combine JSON metadata with real-time data
+        stock_info = {
+            "Company Name": json_data.get("title", "Unknown") if json_data else "Unknown",
+            "CIK": json_data.get("cik_str", "Unknown") if json_data else "Unknown",
+        }
+
+        if "Error" not in real_time_data:
+            stock_info.update(real_time_data)
+        else:
+            stock_info["Message"] = real_time_data["Error"]
+
+        return stock_info
+
+    except Exception as e:
+        return f"Error fetching stock data: {e}"
+
+# Filter Stocks by Metric
+def filter_stocks_by_metric(metric, value):
+    filtered_stocks = []
+    for ticker, data in stock_metadata.items():
+        if str(data.get(metric, "")).lower() == str(value).lower():
+            filtered_stocks.append({
+                "Ticker": ticker,
+                "Company Name": data.get("title", "Unknown"),
+                "Sector": data.get("sector", "Unknown"),
+                "Market Cap": data.get("market_cap", "Unknown"),
+                "Volume": data.get("volume", "Unknown"),
+            })
+    return filtered_stocks
 
 # Generate Response Function
 def generate_response(query):
@@ -81,72 +149,12 @@ def generate_response(query):
     except Exception as e:
         return f"An error occurred: {e}"
 
-# Fetch Stock Data by Ticker
-import requests
-
-def fetch_real_time_data_alpha_vantage(ticker):
-    api_key = os.getenv("alpha_vantage_api_key")  # Replace with your API key
-    url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={ticker}&apikey={api_key}"
-    response = requests.get(url)
-    data = response.json()
-
-    if "Global Quote" in data:
-        quote = data["Global Quote"]
-        return {
-            "Symbol": quote.get("01. symbol", "Unknown"),
-            "Open": quote.get("02. open", "N/A"),
-            "High": quote.get("03. high", "N/A"),
-            "Low": quote.get("04. low", "N/A"),
-            "Price": quote.get("05. price", "N/A"),
-            "Volume": quote.get("06. volume", "N/A"),
-            "Previous Close": quote.get("08. previous close", "N/A"),
-        }
-    else:
-        return {"Error": "No data found for ticker using Alpha Vantage."}
-
-def get_stock_data(ticker):
-    try:
-        # Ensure ticker is uppercase
-        ticker = ticker.upper()
-
-        # Fetch metadata from JSON
-        json_data = None
-        for key, value in stock_metadata.items():
-            if value.get("ticker") == ticker:
-                json_data = value
-                break
-
-        # Fetch real-time data from Alpha Vantage
-        real_time_data = fetch_real_time_data_alpha_vantage(ticker)
-
-        # Combine JSON metadata with real-time data
-        stock_info = {
-            "Company Name": json_data.get("title", "Unknown") if json_data else "Unknown",
-            "CIK": json_data.get("cik_str", "Unknown") if json_data else "Unknown",
-        }
-
-        if "Error" not in real_time_data:
-            stock_info.update(real_time_data)
-        else:
-            stock_info["Message"] = real_time_data["Error"]
-
-        return stock_info
-
-    except Exception as e:
-        return f"Error fetching stock data: {e}"
-
-
 # Streamlit UI
-st.title("Stock Chatbot")
+st.title("TradeQuery")
 st.write("Search for stocks based on natural language queries or retrieve real-time data for specific tickers.")
 
 # Query Input
 query = st.text_input("Enter your query about stocks (e.g., 'What companies build data centers?'):")
-
-# Ticker Input
-ticker = st.text_input("Enter a stock ticker (e.g., AAPL, TSLA, META) for real-time data:")
-
-# Submit Button for Query
 if st.button("Submit"):
     if query:
         response = generate_response(query)
@@ -155,7 +163,27 @@ if st.button("Submit"):
     else:
         st.warning("Please enter a query.")
 
-# Get Stock Data Button
+# Metric-Based Filtering
+st.write("Or filter by specific metrics:")
+metric = st.selectbox("Select a metric to filter by:", ["sector", "market_cap", "volume"])
+value = st.text_input("Enter the value to filter by:")
+# Search by Metric Button
+if st.button("Search by Metric"):
+    if metric and value:
+        results = filter_stocks_by_metric(metric, value)
+        if results:
+            st.write(f"Stocks filtered by {metric} = {value}:")
+            for stock in results:
+                st.write(stock)
+        else:
+            st.warning("No stocks found matching the criteria.")
+    else:
+        st.warning("Please select a metric and enter a value.")
+
+# Ticker Input
+ticker = st.text_input("Enter a stock ticker (e.g., AAPL, TSLA, META) for real-time data:")
+
+
 if st.button("Get Stock Data"):
     if ticker:
         stock_data = get_stock_data(ticker)
@@ -163,9 +191,7 @@ if st.button("Get Stock Data"):
             st.warning(stock_data)
         else:
             st.write(f"Data for {ticker.upper()}:")
-            for key, value in stock_data.items():
-                st.write(f"{key}: {value}")
+            # Display the stock data as a table
+            st.table(pd.DataFrame.from_dict(stock_data, orient="index", columns=["Value"]).reset_index().rename(columns={"index": "Metric"}))
     else:
         st.warning("Please enter a stock ticker.")
-
-
